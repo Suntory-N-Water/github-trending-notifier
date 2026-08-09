@@ -3,6 +3,11 @@ import { fetchRepositoryReadme } from '../crawler/github';
 import { fetchTrendingRepositories } from '../crawler/scraper';
 import type { TrendItem } from '../crawler/scraper';
 import { getLogger } from '../lib/logger';
+import {
+  createDiscordAdapter,
+  type NotificationAdapter,
+  type NotificationContent,
+} from '../lib/notification';
 import { normalizeReadmeMarkdown } from '../lib/readme-normalizer';
 import { getRepositories, saveOrUpdateRepository } from '../lib/repository';
 
@@ -14,6 +19,17 @@ export default {
    */
   async scheduled(_event, env, _ctx): Promise<void> {
     logger.info('Starting scheduled task');
+
+    const webhookUrl = env.DISCORD_WEBHOOK_URL?.trim() ?? '';
+    if (webhookUrl === '') {
+      logger.warn(
+        'DISCORD_WEBHOOK_URL is not set or empty. Notifications will be mocked.',
+      );
+    }
+    const notificationAdapter =
+      webhookUrl === ''
+        ? createMockAdapter()
+        : createDiscordAdapter(webhookUrl);
 
     // 環境変数から言語設定を読み込み
     const languageConfig = loadLanguageConfig(env);
@@ -35,9 +51,54 @@ export default {
       }
     }
 
+    if (allItems.length > 0) {
+      await sendNotifications({ adapter: notificationAdapter, allItems });
+    } else {
+      logger.info('No trending repositories to notify');
+    }
+
     logger.info('Scheduled task completed');
   },
 } satisfies ExportedHandler<CloudflareBindings>;
+
+async function sendNotifications({
+  adapter,
+  allItems,
+}: {
+  adapter: NotificationAdapter;
+  allItems: Array<{
+    label: string;
+    items: (TrendItem & { summary: string })[];
+  }>;
+}): Promise<void> {
+  for (const [index, { label, items }] of allItems.entries()) {
+    const content: NotificationContent = {
+      title:
+        label === 'all'
+          ? 'GitHub Trending Daily (All Languages)'
+          : `GitHub Trending Daily (${label.charAt(0).toUpperCase() + label.slice(1)})`,
+      items,
+    };
+
+    await adapter.send(content);
+
+    // Discord API のレート制限を避けるため言語ごとの送信間に待機
+    if (index < allItems.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+}
+
+function createMockAdapter(): NotificationAdapter {
+  return {
+    async send(content: NotificationContent): Promise<void> {
+      logger.info(
+        { title: content.title, itemCount: content.items.length },
+        '[MOCK] Notification would be sent',
+      );
+    },
+  };
+}
 
 /**
  * README取得と要約生成(短め・詳細)を行います
